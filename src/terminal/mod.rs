@@ -214,6 +214,14 @@ impl Terminal {
     fn draw(&mut self, (string, rgb_data): &StringInfo) -> IOResult<()> {
         use std::fmt::Write;
 
+        // Detect half-block mode: 6 bytes per character instead of 3
+        let char_count = string.chars().filter(|c| *c != '\r' && *c != '\n').count();
+        let is_halfblock = char_count > 0 && rgb_data.len() == char_count * 6;
+
+        if is_halfblock {
+            return self.draw_halfblock(string, rgb_data);
+        }
+
         let can_delta = self.prev_rgb.len() == rgb_data.len() && !rgb_data.is_empty();
 
         if can_delta {
@@ -300,6 +308,107 @@ impl Terminal {
         self.prev_rgb.clear();
         self.prev_rgb.extend_from_slice(rgb_data);
 
+        Ok(())
+    }
+
+    /// Draws a half-block frame with foreground + background colors per cell.
+    /// RGB data format: 6 bytes per cell (fg_r, fg_g, fg_b, bg_r, bg_g, bg_b).
+    fn draw_halfblock(&mut self, string: &str, rgb_data: &[u8]) -> IOResult<()> {
+        use std::fmt::Write;
+
+        let term_w = self.terminal_width as usize;
+        let can_delta = self.prev_rgb.len() == rgb_data.len() && !rgb_data.is_empty();
+
+        if can_delta {
+            // Delta render for half-block — mirrors the original delta renderer's
+            // cursor_at pattern for proven performance characteristics
+            let mut buf = String::with_capacity(string.len() * 8);
+            let mut last_fg: Option<[u8; 3]> = None;
+            let mut last_bg: Option<[u8; 3]> = None;
+            let mut cursor_at: Option<usize> = None;
+
+            for (i, _c) in string.chars().filter(|c| *c != '\r' && *c != '\n').enumerate() {
+                let rgb_off = i * 6;
+                if rgb_off + 5 >= rgb_data.len() {
+                    break;
+                }
+
+                let fg = &rgb_data[rgb_off..rgb_off + 3];
+                let bg = &rgb_data[rgb_off + 3..rgb_off + 6];
+                let prev_fg = &self.prev_rgb[rgb_off..rgb_off + 3];
+                let prev_bg = &self.prev_rgb[rgb_off + 3..rgb_off + 6];
+
+                if fg == prev_fg && bg == prev_bg {
+                    continue;
+                }
+
+                // Position cursor if not already there, or at row boundary
+                if cursor_at != Some(i) || (term_w > 0 && i % term_w == 0) {
+                    let _ = write!(buf, "\x1b[{};{}H", i / term_w + 1, i % term_w + 1);
+                    last_fg = None;
+                    last_bg = None;
+                }
+
+                let fg_color = [fg[0], fg[1], fg[2]];
+                let bg_color = [bg[0], bg[1], bg[2]];
+
+                if last_fg != Some(fg_color) || last_bg != Some(bg_color) {
+                    let _ = write!(
+                        buf,
+                        "\x1b[38;2;{};{};{};48;2;{};{};{}m▀",
+                        fg[0], fg[1], fg[2], bg[0], bg[1], bg[2]
+                    );
+                    last_fg = Some(fg_color);
+                    last_bg = Some(bg_color);
+                } else {
+                    buf.push('▀');
+                }
+
+                cursor_at = Some(i + 1);
+            }
+
+            if !buf.is_empty() {
+                buf.push_str("\x1b[0m");
+                let mut out = stdout();
+                out.write_all(buf.as_bytes())?;
+                out.flush()?;
+            }
+        } else {
+            // Full redraw for half-block
+            let mut colored = String::with_capacity(string.len() * 30);
+            let mut cell_idx = 0;
+
+            for c in string.chars() {
+                if c == '\r' || c == '\n' {
+                    continue;
+                }
+
+                let rgb_off = cell_idx * 6;
+                if rgb_off + 5 >= rgb_data.len() {
+                    break;
+                }
+
+                let _ = write!(
+                    colored,
+                    "\x1b[38;2;{};{};{};48;2;{};{};{}m▀",
+                    rgb_data[rgb_off],
+                    rgb_data[rgb_off + 1],
+                    rgb_data[rgb_off + 2],
+                    rgb_data[rgb_off + 3],
+                    rgb_data[rgb_off + 4],
+                    rgb_data[rgb_off + 5]
+                );
+                cell_idx += 1;
+            }
+
+            colored.push_str("\x1b[0m");
+            let mut out = stdout();
+            execute!(out, MoveTo(0, 0), Print(&colored), MoveTo(0, 0))?;
+            out.flush()?;
+        }
+
+        self.prev_rgb.clear();
+        self.prev_rgb.extend_from_slice(rgb_data);
         Ok(())
     }
 

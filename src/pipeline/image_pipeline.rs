@@ -21,6 +21,8 @@ pub struct ImagePipeline {
     lut: [char; 256],
     /// Use smooth (CatmullRom) downscaling instead of nearest-neighbor
     pub smooth_resize: bool,
+    /// Half-block mode: uses ▀ with fg+bg colors for 2x vertical resolution
+    pub half_block_mode: bool,
 }
 
 impl ImagePipeline {
@@ -41,6 +43,7 @@ impl ImagePipeline {
             new_lines,
             lut,
             smooth_resize: false,
+            half_block_mode: false,
         }
     }
 
@@ -194,6 +197,53 @@ impl ImagePipeline {
         }
 
         output
+    }
+    /// Converts RGB pixel data to half-block characters (▀) with 2x vertical resolution.
+    /// Each terminal cell represents 2 vertical pixels using foreground and background colors.
+    /// Returns (string of ▀ characters, rgb_data with 6 bytes per cell: top_rgb + bottom_rgb).
+    pub fn to_half_blocks_from_rgb(
+        &self,
+        rgb_data: &[u8],
+        width: u32,
+        height: u32,
+    ) -> (String, Vec<u8>) {
+        let out_height = height / 2;
+        let capacity = (width as usize + 1) * out_height as usize;
+        let mut output = String::with_capacity(capacity);
+        // 6 bytes per cell: 3 for top pixel (foreground), 3 for bottom pixel (background)
+        let mut rgb_out = Vec::with_capacity(capacity * 6);
+
+        for y in (0..height).step_by(2) {
+            let top_row_start = (y * width * 3) as usize;
+            let bot_row_start = if y + 1 < height {
+                ((y + 1) * width * 3) as usize
+            } else {
+                top_row_start // duplicate last row if odd height
+            };
+
+            for x in 0..width as usize {
+                let top_idx = top_row_start + x * 3;
+                let bot_idx = bot_row_start + x * 3;
+
+                output.push('▀');
+
+                // Top pixel RGB (foreground)
+                rgb_out.push(rgb_data[top_idx]);
+                rgb_out.push(rgb_data[top_idx + 1]);
+                rgb_out.push(rgb_data[top_idx + 2]);
+                // Bottom pixel RGB (background)
+                rgb_out.push(rgb_data[bot_idx]);
+                rgb_out.push(rgb_data[bot_idx + 1]);
+                rgb_out.push(rgb_data[bot_idx + 2]);
+            }
+
+            if self.new_lines && y + 2 < height {
+                output.push('\r');
+                output.push('\n');
+            }
+        }
+
+        (output, rgb_out)
     }
 }
 
