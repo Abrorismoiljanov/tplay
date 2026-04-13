@@ -128,7 +128,7 @@ impl Runner {
             pipeline.char_map.clone(),
             CHARS1.to_string().chars().collect(),
             CHARS2.to_string().chars().collect(),
-            CHARS3.to_string().chars().collect(),
+            HALFBLOCK.to_string().chars().collect(), // 3: half-block (2x vertical resolution)
             SOLID.to_string().chars().collect(),
             DOTTED.to_string().chars().collect(),
             GRADIENT.to_string().chars().collect(),
@@ -234,6 +234,13 @@ impl Runner {
         let (width, height) = (rgb_image.width(), rgb_image.height());
         let rgb_info = rgb_image.into_raw();
 
+        if self.pipeline.half_block_mode {
+            let (ascii, rgb_data) =
+                self.pipeline.to_half_blocks_from_rgb(&rgb_info, width, height);
+            let (ascii, rgb_data) = self.pad_to_terminal_halfblock(ascii, rgb_data, width, height / 2);
+            return Ok((ascii, rgb_data));
+        }
+
         let ascii = self.pipeline.to_ascii_from_rgb(&rgb_info, width, height);
 
         // Add newlines to the rgb_info to match the ascii string These are not
@@ -302,6 +309,62 @@ impl Runner {
                 for _ in 0..term_w {
                     padded_ascii.push(' ');
                     padded_rgb.extend_from_slice(&[0, 0, 0]);
+                }
+            }
+        }
+
+        (padded_ascii, padded_rgb)
+    }
+
+    /// Pads half-block output to the terminal dimensions.
+    /// Half-block RGB data uses 6 bytes per cell (fg_rgb + bg_rgb).
+    fn pad_to_terminal_halfblock(
+        &self,
+        ascii: String,
+        rgb: Vec<u8>,
+        img_w: u32,
+        img_h: u32,
+    ) -> (String, Vec<u8>) {
+        let img_w = img_w as usize;
+        let img_h = img_h as usize;
+        let term_w = self.terminal_cols as usize;
+        let term_h = self.terminal_rows as usize;
+
+        if img_w == term_w && img_h == term_h {
+            return (ascii, rgb);
+        }
+
+        let x_offset = (term_w.saturating_sub(img_w)) / 2;
+        let y_offset = (term_h.saturating_sub(img_h)) / 2;
+
+        let mut padded_ascii = String::with_capacity(term_w * term_h);
+        let mut padded_rgb = Vec::with_capacity(term_w * term_h * 6);
+        let ascii_chars: Vec<char> = ascii.chars().collect();
+
+        for row in 0..term_h {
+            let img_row = row.wrapping_sub(y_offset);
+            if row >= y_offset && img_row < img_h {
+                let start = img_row * img_w;
+                let end = (start + img_w).min(ascii_chars.len());
+                let written = end - start;
+                // Left padding
+                for _ in 0..x_offset {
+                    padded_ascii.push(' ');
+                    padded_rgb.extend_from_slice(&[0, 0, 0, 0, 0, 0]);
+                }
+                // Image content
+                padded_ascii.extend(&ascii_chars[start..end]);
+                padded_rgb.extend_from_slice(&rgb[start * 6..end * 6]);
+                // Right padding
+                for _ in (x_offset + written)..term_w {
+                    padded_ascii.push(' ');
+                    padded_rgb.extend_from_slice(&[0, 0, 0, 0, 0, 0]);
+                }
+            } else {
+                // Blank row
+                for _ in 0..term_w {
+                    padded_ascii.push(' ');
+                    padded_rgb.extend_from_slice(&[0, 0, 0, 0, 0, 0]);
                 }
             }
         }
@@ -413,6 +476,13 @@ impl Runner {
                 (term_w, term_h)
             };
 
+        // In half-block mode, we need 2x the pixel height since each terminal row
+        // represents 2 vertical pixels
+        let target_h = if self.pipeline.half_block_mode {
+            target_h * 2
+        } else {
+            target_h
+        };
         let _ = self.pipeline.set_target_resolution(target_w, target_h);
     }
 
@@ -422,9 +492,13 @@ impl Runner {
     ///
     /// * `char_map` - The index of the character map to use.
     fn set_char_map(&mut self, char_map: u32) {
-        self.pipeline.char_map =
-            self.char_maps[(char_map % self.char_maps.len() as u32) as usize].clone();
+        let idx = (char_map % self.char_maps.len() as u32) as usize;
+        self.pipeline.char_map = self.char_maps[idx].clone();
+        self.pipeline.half_block_mode = idx == 3; // index 3 = HALFBLOCK
         self.pipeline.rebuild_lut();
+
+        // Re-trigger resize so half_block_mode's 2x height is applied (or reverted)
+        self.resize_pipeline(self.terminal_cols as u16, self.terminal_rows as u16);
     }
 
     /// Determines if a frame should be processed based on the current time and the Runner's state.

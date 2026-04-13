@@ -26,3 +26,7 @@ pub const GRADIENT: &str = r#" ░▒▓█"#; // 5 chars
 pub const BLACKWHITE: &str = r#" █"#; // 2 chars
 pub const BW_DOTTED: &str = r#" ⣿"#; // 2 dotted block
 pub const BRAILLE: &str = r#" ··⣀⣀⣤⣤⣤⣀⡀⢀⠠⠔⠒⠑⠊⠉⠁"#; // 16 chars (braille-based)
+
+// Half-block mode marker — used to signal half-block rendering (▀ with fg+bg colors)
+// Doubles vertical resolution by encoding 2 pixel rows per terminal row
+pub const HALFBLOCK: &str = "▀";
